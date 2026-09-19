@@ -70,6 +70,17 @@ public final class SelfCheck {
                     running.toPlainString(), closing.toPlainString(),
                     running.subtract(closing).toPlainString());
         }
+
+        Map<String, Object> reconciliation = in.simplifymoney.ledgersync.report.Reports
+                .reconciliation(ledger, store.balanceSnapshots());
+        @SuppressWarnings("unchecked")
+        List<Object> discrepancies = (List<Object>) reconciliation.get("discrepancies");
+        System.out.println("\nRECONCILIATION");
+        System.out.printf("  discrepancies found: %d%n", discrepancies.size());
+        for (Object d : discrepancies) {
+            System.out.println("  " + Json.write(d));
+        }
+
         System.out.println("\nThis is the starting point, not the finish line.");
     }
 }
