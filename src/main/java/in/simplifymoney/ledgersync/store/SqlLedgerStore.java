@@ -1,5 +1,6 @@
 package in.simplifymoney.ledgersync.store;
 
+import in.simplifymoney.ledgersync.ingest.BalanceSnapshot;
 import in.simplifymoney.ledgersync.model.Category;
 import in.simplifymoney.ledgersync.model.Direction;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
@@ -16,10 +17,17 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.TreeSet;
 
 /**
  * The store this service has used since it was written: a single relational
  * table, reached over plain JDBC.
+ *
+ * save() is idempotent by natural key (see LedgerStore) - implemented here as
+ * a look-up before writing, not a schema-level UNIQUE constraint. The legacy
+ * rows in db/migration/V2__seed.sql predate this guarantee and contain real
+ * duplicates on purpose (see incident/, Backfill); adding a UNIQUE constraint
+ * would make migrate() fail on that seed data.
  *
  * The driver is a runtime dependency (see build.gradle) - this class compiles
  * against the JDK alone.
@@ -78,6 +86,39 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
 
     @Override
     public void save(NormalizedTxn t) {
+        try {
+            List<String> existingIds = findSourceMessageIds(t);
+            if (existingIds == null) {
+                insert(t);
+                return;
+            }
+            TreeSet<String> merged = new TreeSet<>(existingIds);
+            merged.addAll(t.sourceMessageIds());
+            if (merged.size() == existingIds.size()) return; // already up to date
+            update(t, merged);
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not save " + t, e);
+        }
+    }
+
+    /** Null means no existing row for this natural key. */
+    private List<String> findSourceMessageIds(NormalizedTxn t) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT source_message_ids FROM ledger WHERE account_last4 = ? AND"
+                        + " direction = ? AND amount = ? AND occurred_at = ?")) {
+            ps.setString(1, t.accountLast4());
+            ps.setString(2, t.direction().name());
+            ps.setBigDecimal(3, t.amount());
+            ps.setString(4, t.occurredAt().toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                return Arrays.stream(rs.getString(1).split(","))
+                        .filter(s -> !s.isBlank()).toList();
+            }
+        }
+    }
+
+    private void insert(NormalizedTxn t) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO ledger(account_last4, occurred_at, direction, amount,"
                         + " category, merchant, source_message_ids)"
@@ -90,8 +131,22 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
             ps.setString(6, t.merchant());
             ps.setString(7, String.join(",", t.sourceMessageIds()));
             ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new IllegalStateException("could not save " + t, e);
+        }
+    }
+
+    private void update(NormalizedTxn t, TreeSet<String> mergedIds) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE ledger SET source_message_ids = ?, category = ?, merchant = ?"
+                        + " WHERE account_last4 = ? AND direction = ? AND amount = ?"
+                        + " AND occurred_at = ?")) {
+            ps.setString(1, String.join(",", mergedIds));
+            ps.setString(2, t.category().name());
+            ps.setString(3, t.merchant());
+            ps.setString(4, t.accountLast4());
+            ps.setString(5, t.direction().name());
+            ps.setBigDecimal(6, t.amount());
+            ps.setString(7, t.occurredAt().toString());
+            ps.executeUpdate();
         }
     }
 
@@ -142,5 +197,35 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
     @Override
     public void close() {
         try { conn.close(); } catch (SQLException ignored) { }
+    }
+
+    @Override
+    public void saveBalanceSnapshot(BalanceSnapshot s) {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "MERGE INTO balance_snapshot(account_last4, occurred_at, balance) VALUES (?,?,?)")) {
+            ps.setString(1, s.accountLast4());
+            ps.setString(2, s.occurredAt().toString());
+            ps.setBigDecimal(3, s.balance());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not save " + s, e);
+        }
+    }
+
+    @Override
+    public List<BalanceSnapshot> balanceSnapshots() {
+        List<BalanceSnapshot> out = new ArrayList<>();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT account_last4, occurred_at, balance FROM balance_snapshot"
+                             + " ORDER BY account_last4, occurred_at")) {
+            while (rs.next()) {
+                out.add(new BalanceSnapshot(rs.getString(1),
+                        OffsetDateTime.parse(rs.getString(2)), rs.getBigDecimal(3).setScale(2)));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not read balance snapshots", e);
+        }
+        return out;
     }
 }

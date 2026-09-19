@@ -1,8 +1,6 @@
 package in.simplifymoney.ledgersync.ingest;
 
 import in.simplifymoney.ledgersync.json.Json;
-import in.simplifymoney.ledgersync.model.Category;
-import in.simplifymoney.ledgersync.model.Direction;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import in.simplifymoney.ledgersync.model.RawMessage;
 import in.simplifymoney.ledgersync.parse.ParsedTxn;
@@ -21,9 +19,14 @@ import java.util.stream.Stream;
 /**
  * Reads a corpus of raw messages and puts transactions in the ledger.
  *
- * This is the naive version. It parses each message on its own and saves
- * whatever comes back. It does not ask whether two messages describe the same
- * transaction, and it decides the category from the direction alone.
+ * Each message is parsed on its own, but nothing is saved message-by-message:
+ * the whole batch is handed to TransactionAssembler first, which merges
+ * evidence for the same real-world transaction (a message uploaded twice, or
+ * reported on more than one channel) and decides MICRO/TRANSFER, which needs
+ * to see other messages in the batch to work out. Only the merged,
+ * categorised transactions are saved - and LedgerStore.save() is itself
+ * idempotent by natural key, so re-running this against the same or an
+ * overlapping corpus leaves the ledger unchanged.
  */
 public final class IngestService {
 
@@ -37,18 +40,27 @@ public final class IngestService {
 
     public Stats ingestFile(Path corpus) throws IOException {
         List<RawMessage> messages = readCorpus(corpus);
-        int parsed = 0;
+
+        List<ParsedTxn> parsed = new ArrayList<>();
         int skipped = 0;
         for (RawMessage m : messages) {
             Optional<ParsedTxn> p = parsers.parse(m);
             if (p.isEmpty()) {
                 skipped++;
-                continue;
+            } else {
+                parsed.add(p.get());
             }
-            store.save(toTransaction(p.get()));
-            parsed++;
         }
-        return new Stats(messages.size(), parsed, skipped);
+
+        TransactionAssembler.Assembled assembled = TransactionAssembler.assemble(parsed);
+        for (NormalizedTxn txn : assembled.transactions()) {
+            store.save(txn);
+        }
+        for (BalanceSnapshot s : assembled.balanceSnapshots()) {
+            store.saveBalanceSnapshot(s);
+        }
+
+        return new Stats(messages.size(), parsed.size(), skipped, assembled.transactions().size());
     }
 
     public static List<RawMessage> readCorpus(Path corpus) throws IOException {
@@ -68,11 +80,19 @@ public final class IngestService {
         return out;
     }
 
-    private NormalizedTxn toTransaction(ParsedTxn p) {
-        Category c = p.direction() == Direction.DEBIT ? Category.SPEND : Category.INCOME;
-        return new NormalizedTxn(p.accountLast4(), p.occurredAt(), p.direction(),
-                p.amount(), c, p.merchant(), List.of(p.sourceMessageId()));
+    /**
+     * messagesRead     every line in the corpus
+     * messagesMatched  messages a parser recognised as a transaction (before merging)
+     * messagesSkipped  messages no parser could read - OTPs, ads, balance
+     *                   enquiries, delivery notices, and the like. Not an error.
+     * transactionsWritten  real transactions after merging duplicate/multi-channel evidence
+     */
+    public record Stats(int messagesRead, int messagesMatched, int messagesSkipped,
+                         int transactionsWritten) {
+        @Override
+        public String toString() {
+            return "Stats{messagesRead=%d, messagesMatched=%d, messagesSkipped=%d, transactionsWritten=%d}"
+                    .formatted(messagesRead, messagesMatched, messagesSkipped, transactionsWritten);
+        }
     }
-
-    public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped) {}
 }
