@@ -35,4 +35,13 @@ public final class Dates {
         }
         return null;
     }
+
+    /** A date-time in any offset, normalised to IST - used for the Date:
+     *  header on transaction-alert emails, which (unlike SMS) does carry an
+     *  explicit offset, and it is not always IST. Two messages reporting the
+     *  same transaction must produce the same occurredAt regardless of which
+     *  offset they were written in, or dedup breaks. */
+    public static OffsetDateTime toIst(OffsetDateTime dt) {
+        return dt.withOffsetSameInstant(IST);
+    }
 }
