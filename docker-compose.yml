@@ -1,0 +1,39 @@
+services:
+  mongo:
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Runs once: turns the single mongod instance into a one-node replica set.
+  # save() uses a session transaction across the transactions and
+  # account_category_totals collections, and Mongo only supports multi-document
+  # transactions on a replica set - even a one-node one. Idempotent: if the
+  # replica set is already initiated (e.g. this container restarted), it
+  # leaves it alone instead of failing.
+  mongo-init:
+    image: mongo:7
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: >
+      mongosh --host mongo:27017 --quiet --eval '
+        try {
+          rs.status();
+          print("replica set rs0 already initiated");
+        } catch (e) {
+          rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "mongo:27017" }] });
+          print("replica set rs0 initiated");
+        }
+      '
+
+volumes:
+  mongo-data:
