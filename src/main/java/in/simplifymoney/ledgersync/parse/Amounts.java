@@ -15,10 +15,10 @@ public final class Amounts {
     private Amounts() {}
 
     private static final Pattern AMOUNT =
-            Pattern.compile("(?:Rs\\.?|INR)\\s*([0-9,]+\\.[0-9]{2})");
+            Pattern.compile("(?:Rs\\.?|INR)\\s*([0-9,]+(?:\\.[0-9]{2})?)");
 
     private static final Pattern BALANCE = Pattern.compile(
-            "(?:Avl\\s*Bal|Available\\s*Balance|BalAvl|Avl\\s*Limit)\\s*:?\\s*"
+            "(?:Avl\\s*Bal|Available\\s*Balance|BalAvl)\\s*:?\\s*"
                     + "(?:Rs\\.?|INR)\\s*([0-9,]+\\.[0-9]{2})",
             Pattern.CASE_INSENSITIVE);
 
@@ -29,7 +29,15 @@ public final class Amounts {
         return toDecimal(m.group(1));
     }
 
-    /** The balance the bank quoted, if it quoted one. */
+    /**
+     * The balance the bank quoted, if it quoted one - "Avl Bal", "Available
+     * Balance" or "BalAvl". Deliberately does NOT match "Avl Limit": a credit
+     * card's available limit is not a running balance (it moves for reasons a
+     * spend message never mentions - payments, holds, statement cycles), so
+     * treating it as one floods reconciliation with false positives. See
+     * Reports.reconciliation() and the card-specific parsing in
+     * HdfcSmsParser.
+     */
     public static BigDecimal statedBalance(String body) {
         Matcher m = BALANCE.matcher(body);
         if (!m.find()) return null;
